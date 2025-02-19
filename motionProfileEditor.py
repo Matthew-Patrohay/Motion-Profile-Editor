@@ -11,6 +11,9 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QDoubleSpinBox, QPushButton, QHBoxLayout, QSpacerItem, QSizePolicy, QGridLayout
 )
+import matplotlib.ticker as ticker
+from matplotlib.ticker import FuncFormatter
+
 
 matplotlib.use('Agg')
 logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
@@ -68,7 +71,7 @@ class TrajectoryPlanner(QWidget):
         self.ax_speed.set_ylabel("degrees/sec")
         self.ax_accel.set_ylabel("degrees/sec²")
         self.ax_jerk.set_ylabel("degrees/sec³")
-        self.ax_jerk.set_xlabel("seconds")
+        self.ax_jerk.set_xlabel("milliseconds")
 
         # Match figure background to GUI
         self.fig.patch.set_facecolor(bg_color)
@@ -81,6 +84,9 @@ class TrajectoryPlanner(QWidget):
             ax.xaxis.label.set_color(text_color)
             ax.yaxis.label.set_color(text_color)
             ax.tick_params(colors=text_color)
+            
+            # Add light gray grid lines
+            ax.grid(True, which="both", linestyle="--", linewidth=0.5, color="lightgray", alpha=0.5)
 
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setStyleSheet(f"background-color: {bg_color};")
@@ -88,7 +94,7 @@ class TrajectoryPlanner(QWidget):
         # Initial plot setup
         self.time = np.linspace(0, 1, 100)
         self.position_line, = self.ax_position.plot(self.time, np.zeros_like(self.time), label="Position", color='#bf5af2')
-        self.speed_line, = self.ax_speed.plot(self.time, np.zeros_like(self.time), label="Speed", color='#0b84ff')
+        self.speed_line, = self.ax_speed.plot(self.time, np.zeros_like(self.time), label="Velocity", color='#0b84ff')
         self.accel_line, = self.ax_accel.plot(self.time, np.zeros_like(self.time), label="Acceleration", color='#ff453a')
         self.jerk_line, = self.ax_jerk.plot(self.time, np.zeros_like(self.time), label="Jerk", color='#ff9f0b')
 
@@ -275,6 +281,14 @@ class TrajectoryPlanner(QWidget):
 
         trapezoidal_button.clicked.connect(toggle_mode)
 
+        # Label to display calculated statistics
+        self.statistics_label = QLabel("Trajectory Statistics:\n")
+        self.statistics_label.setStyleSheet(f"""
+            color: {text_color}; 
+            font-size: 14px; 
+            font-family: "Menlo", Menlo, monospace;
+        """)
+        
         # Add both buttons to the spacer section
         button_layout = QHBoxLayout()
         button_layout.addWidget(reset_button)
@@ -286,6 +300,7 @@ class TrajectoryPlanner(QWidget):
         right_column.addLayout(top_spacer_section)  # Blank section at the top
         right_column.addLayout(controls_layout)  # Sliders in the middle
         right_column.addLayout(spacer_section)  # Reset button at the bottom
+        right_column.addWidget(self.statistics_label)  # Add to layout
         right_column.addStretch(1)  # Push everything else down
 
         # Main layout: Plots on the left, controls on the right
@@ -319,6 +334,142 @@ class TrajectoryPlanner(QWidget):
             # Compute Jerk (numerical derivative of acceleration)
             jerk_values = np.gradient(profiles[:, 0, 0], new_time)  # d(Acceleration)/dt
 
+
+            # Define important y-tick positions
+            position_ticks = [self.q0, self.q1]  # Min/Max position
+            velocity_ticks = [0, self.v_max] if (self.q0 - self.q1) < 0 else [-self.v_max, 0] # Min/Max velocity
+            acceleration_ticks = [self.a_max, -self.a_max]  # Min/Max acceleration
+            jerk_ticks = [self.j_max, -self.j_max]  # Min/Max jerk
+
+            # Function to add padding
+            def add_padding(tick_values, padding_factor=0.15):
+                """Adds padding to the y-axis limits while preserving auto ticks."""
+                min_val, max_val = min(tick_values), max(tick_values)
+                padding = (max_val - min_val) * padding_factor  # 10% extra space
+                return min_val - padding, max_val + padding
+
+            for ax, manual_ticks in zip(
+                [self.ax_position, self.ax_speed, self.ax_accel, self.ax_jerk],
+                [position_ticks, velocity_ticks, acceleration_ticks, jerk_ticks]
+            ):
+                # Remove previously added grid lines if they exist
+                if hasattr(ax, "custom_grid_lines"):
+                    for line in ax.custom_grid_lines:
+                        line.remove()  # Properly remove the old grid lines
+                ax.custom_grid_lines = []  # Reset the list
+
+                # Disable default grid
+                ax.grid(False)
+
+                min_val, max_val = min(manual_ticks), max(manual_ticks)
+                computed_ticks = np.linspace(min_val, max_val, num=6)
+
+                ax.set_yticks(computed_ticks)
+                ax.set_ylim(add_padding(computed_ticks))
+
+                # Ensure minor ticks are used but not excessive
+                # ax.yaxis.set_minor_locator(ticker.AutoMinorLocator(n=2))
+
+                # Draw new manual grid lines
+                for tick in computed_ticks:
+                    line_alpha = 0.9 if tick in manual_ticks else 0.3  # Min/max values are stronger
+                    line_color = "lightgray" if tick in manual_ticks else "darkgray"
+                    line_thickness = 0.5 if tick in manual_ticks else 0.3
+                    line = ax.axhline(y=tick, linestyle="--", linewidth=line_thickness, color=line_color, alpha=line_alpha)
+                    ax.custom_grid_lines.append(line)  # Store reference for future removal
+
+            # Compute statistics
+            estimationErrorPercentage = 0.001
+            total_time = max(tr.time)
+            time_step = new_time[1] - new_time[0]
+            max_velocity_time = np.sum(profiles[:, 0, 1] >= self.v_max - (estimationErrorPercentage * self.v_max)) * time_step
+            max_acceleration_time = np.sum(profiles[:, 0, 0] >= self.a_max - (estimationErrorPercentage * self.a_max)) * time_step
+            min_acceleration_time = np.sum(profiles[:, 0, 0] <= -self.a_max + (estimationErrorPercentage * self.a_max)) * time_step
+            max_jerk_time = np.sum(jerk_values >= self.j_max - (estimationErrorPercentage * self.j_max)) * time_step
+            min_jerk_time = np.sum(jerk_values <= -self.j_max + (estimationErrorPercentage * self.j_max)) * time_step
+            
+            # Compute percentages
+            max_velocity_percent = (max_velocity_time / total_time) * 100
+            max_acceleration_percent = (max_acceleration_time / total_time) * 100
+            min_acceleration_percent = (min_acceleration_time / total_time) * 100
+            max_jerk_percent = (max_jerk_time / total_time) * 100
+            min_jerk_percent = (min_jerk_time / total_time) * 100
+            
+            
+            
+            
+            
+            def nice_ticks(data_max, num_ticks=18):
+                """Compute a 'nice' tick interval ensuring total_time is included, while preventing excessive tick density."""
+                
+                raw_interval = data_max / (num_ticks - 1)
+                
+                # Determine base spacing
+                if raw_interval <= 0.5:
+                    nice_interval = 0.5  # 0.5ms spacing
+                elif raw_interval <= 1:
+                    nice_interval = 1  # 1ms spacing
+                elif raw_interval <= 2:
+                    nice_interval = 2  # 2ms spacing
+                elif raw_interval <= 5:
+                    nice_interval = 5  # 5ms spacing
+                else:
+                    nice_interval = round(raw_interval / 10) * 10  # Default rounding to nearest 10ms
+
+                # Generate tick values
+                ticks = np.arange(0, data_max, nice_interval)
+
+                # # Reduce tick density further if more than 30 ticks are generated
+                # if len(ticks) > 30:
+                #     nice_interval = 5 if nice_interval == 1 else nice_interval  # Switch to 5ms if we were using 1ms
+                #     ticks = np.arange(0, data_max, nice_interval)
+
+                # Ensure total_time is explicitly included
+                if total_time * 1000 not in ticks:
+                    ticks = np.append(ticks, total_time * 1000)
+
+                return np.unique(ticks)  # Ensure unique values
+
+
+            # Compute x-ticks in milliseconds and convert to seconds
+            x_ticks = nice_ticks(total_time * 1000) / 1000  
+
+            # Define a function to format x-ticks as milliseconds
+            def format_ms(x, _):
+                """Format x-ticks: Hide only the tick right before total_time, 2 decimals for total_time, 1 decimal for others."""
+                sorted_ticks = np.sort(x_ticks)  # Ensure sorted ticks
+                if len(sorted_ticks) > 1:
+                    tick_before_total_time = sorted_ticks[np.where(sorted_ticks < total_time)[0][-1]]  # Get the closest tick before total_time
+                else:
+                    tick_before_total_time = None  # Fallback
+
+                if np.isclose(x, total_time, atol=1e-6):  # Highlight total_time with 2 decimals
+                    return f"{x * 1000:.2f}"
+                elif tick_before_total_time is not None and np.isclose(x, tick_before_total_time, atol=1e-6):
+                    return ""  # Hide only the tick immediately before total_time
+                return f"{x * 1000:.1f}"  # 1 decimal for other ticks
+            
+            
+            # Apply new x-ticks and formatting
+            for ax in [self.ax_position, self.ax_speed, self.ax_accel, self.ax_jerk]:
+                if hasattr(ax, "custom_x_grid_lines"):
+                    for line in ax.custom_x_grid_lines:
+                        line.remove()
+                ax.custom_x_grid_lines = []  # Reset the list
+
+                ax.set_xticks(x_ticks)
+                ax.xaxis.set_major_formatter(FuncFormatter(format_ms))
+
+                # Draw new manual grid lines for x-axis
+                for tick in x_ticks:
+                    line_alpha = 0.9 if tick == total_time else 0.3  # Highlight final tick
+                    line_color = "lightgray" if tick == total_time else "darkgray"
+                    line_thickness = 0.5 if tick == total_time else 0.3
+                    line = ax.axvline(x=tick, linestyle="--", linewidth=line_thickness, color=line_color, alpha=line_alpha)
+                    ax.custom_x_grid_lines.append(line)
+                    
+        
+        
             # Update plots
             self.position_line.set_xdata(new_time)
             self.position_line.set_ydata(profiles[:, 0, 2])  # Position
@@ -336,7 +487,19 @@ class TrajectoryPlanner(QWidget):
             for ax in [self.ax_position, self.ax_speed, self.ax_accel, self.ax_jerk]:
                 ax.relim()
                 ax.autoscale_view()
+                
+            leftAlignPadding = 18;
 
+            self.statistics_label.setText(f"""
+                {"Total Time:".ljust(leftAlignPadding)} {total_time * 1000:>6.2f} ms (100.00%)
+                
+                {"Time at Max Vel:".ljust(leftAlignPadding)} {max_velocity_time * 1000:>6.2f} ms ({max_velocity_percent:>4.2f}%)
+                {"Time at Max Accel:".ljust(leftAlignPadding)} {max_acceleration_time * 1000:>6.2f} ms ({max_acceleration_percent:>4.2f}%)
+                {"Time at Max Accel:".ljust(leftAlignPadding)} {min_acceleration_time * 1000:>6.2f} ms ({min_acceleration_percent:>4.2f}%)
+                {"Time at Max Jerk:".ljust(leftAlignPadding)} {max_jerk_time * 1000:>6.2f} ms ({max_jerk_percent:>4.2f}%)
+                {"Time at Min Jerk:".ljust(leftAlignPadding)} {min_jerk_time * 1000:>6.2f} ms ({min_jerk_percent:>4.2f}%)
+            """)
+                            
             # Clear warning message (if any)
             self.warning_label.setText("")  
 

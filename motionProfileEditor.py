@@ -231,7 +231,7 @@ class TrajectoryPlanner(QWidget):
 
             for i, default in enumerate(default_values):
                 self.inputs[i].setValue(default)
-                if i is 2:
+                if i == 2:
                     self.sliders[i].setValue(int(default / jerk_scale))
                 else:
                     self.sliders[i].setValue(default)
